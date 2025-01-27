@@ -1,0 +1,13 @@
+[project]
+name = "jax-tuts"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "jax>=0.5.0",
+    "jupyter>=1.1.1",
+    "matplotlib>=3.10.0",
+    "rich>=13.9.4",
+    "treescope>=0.1.8",
+]

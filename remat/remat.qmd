@@ -1,0 +1,168 @@
+---
+title: Jax remat tutorial playaround
+author: Sam Buchanan
+format:
+    html:
+        code-fold: show
+---
+
+## Source
+
+Building off of [https://jax.readthedocs.io/en/latest/gradient-checkpointing.html](https://jax.readthedocs.io/en/latest/gradient-checkpointing.html)
+
+## Code imports
+
+```{python}
+import jax
+import jax.numpy as jnp
+from jax.ad_checkpoint import print_saved_residuals
+from functools import partial
+```
+
+## Chain-of-maps model
+
+### The full model
+
+```{python}
+
+def g(W, x):
+    y = jnp.dot(W, x)
+    return jnp.sin(y)
+
+
+def f(W1, W2, W3, W4, x):
+    x = g(W1, x)
+    x = g(W2, x)
+    x = g(W3, x)
+    x = g(W4, x)
+    return x
+
+
+W1 = jnp.ones((5, 4))
+W2 = jnp.ones((6, 5))
+W3 = jnp.ones((7, 6))
+W4 = jnp.ones((8, 7))
+x = jnp.ones(4)
+print_saved_residuals(f, W1, W2, W3, W4, x)
+```
+
+### Full remat
+
+```{python}
+def f0(W1, W2, W3, W4, x):
+    h = lambda x: g(W4, g(W3, g(W2, g(W1, x))))
+    h = jax.checkpoint(h)
+    return h(x)
+
+
+print_saved_residuals(f0, W1, W2, W3, W4, x)
+```
+
+### Partial remats
+
+```{python}
+def f1(W1, W2, W3, W4, x):
+    h2 = lambda x: g(W4, g(W3, x))
+    h1 = lambda x: g(W2, g(W1, x))
+    h2 = jax.checkpoint(h2)
+    h1 = jax.checkpoint(h1)
+    h = lambda x: h2(h1(x))
+    return h(x)
+
+
+print_saved_residuals(f1, W1, W2, W3, W4, x)
+```
+
+
+```{python}
+def f2(W1, W2, W3, W4, x):
+    h2 = lambda x: g(W4, g(W3, x))
+    h1 = lambda x: g(W2, g(W1, x))
+    h2 = jax.checkpoint(h2)
+    h1 = jax.checkpoint(h1)
+    h = lambda x: h2(h1(x))
+    return jax.checkpoint(h)(x)
+
+
+print_saved_residuals(f2, W1, W2, W3, W4, x)
+```
+
+Notice in the previous examples that the residuals that `jax.checkpoint`
+discards includes byproducts of both the forward pass and the backward pass.
+In particular, calling it on an enclosing function (in an inductive composition)
+overrides caching of byproducts in the constituent blocks.
+However, these will still be useful (?) when we later recompute the forward passes...
+We can check this by looking at the computational graph.
+
+```{python}
+from jax.tree_util import tree_flatten, tree_unflatten
+
+from rich.console import Console
+from rich.table import Table
+import rich.text
+
+def print_fwd_bwd(f, *args, **kwargs) -> None:
+  args, in_tree = tree_flatten((args, kwargs))
+
+  def f_(*args):
+    args, kwargs = tree_unflatten(in_tree, args)
+    return f(*args, **kwargs)
+
+  fwd = jax.make_jaxpr(lambda *args: jax.vjp(f_, *args))(*args).jaxpr
+
+  y, f_vjp = jax.vjp(f_, *args)
+  res, in_tree = tree_flatten(f_vjp)
+
+  def g_(*args):
+    *res, y = args
+    f_vjp = tree_unflatten(in_tree, res)
+    return f_vjp(y)
+
+  bwd = jax.make_jaxpr(g_)(*res, y).jaxpr
+
+  table = Table(show_header=False, show_lines=True, padding=(1, 2, 0, 2), box=None)
+  table.add_row("[bold green]forward computation:",
+                "[bold green]backward computation:")
+  table.add_row(rich.text.Text.from_ansi(str(fwd)),
+                rich.text.Text.from_ansi(str(bwd)))
+  console = Console(width=240, force_jupyter=True)
+  console.print(table)
+
+def _renderable_repr(self):
+  return self.html
+rich.jupyter.JupyterRenderable._repr_html_ = _renderable_repr
+```
+
+No checkpointing:
+```{python}
+print_fwd_bwd(f, W1, W2, W3, W4, x)
+```
+
+"Full" checkpointing:
+```{python}
+print_fwd_bwd(f0, W1, W2, W3, W4, x)
+```
+
+It's clear from comparing the jaxprs that there is a full forward pass
+computation in the backward pass of `f0`.
+
+Half checkpointing (with wrap):
+```{python}
+print_fwd_bwd(f2, W1, W2, W3, W4, x)
+```
+
+Notice that this seems to be doing the right thing (although we might have
+wastefully wrapped everything in another checkpoint). 
+We cache activations for the first block as we compute the forward pass for the
+second block (these will end up wasted, but they don't get closed into either
+of the remat2 scopes), then we do the second block's forward/backward, then we
+do the first block's. We only ever need residuals for two blocks at a time in
+memory. Compare to the one without the spurious external wrap:
+
+```{python}
+print_fwd_bwd(f1, W1, W2, W3, W4, x)
+```
+
+This one is more efficient, as it doesn't need to waste some FLOPs recomputing
+the first block of the forward pass (since it correctly gets cached from the
+actual forward pass).
