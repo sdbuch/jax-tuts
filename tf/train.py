@@ -34,7 +34,9 @@ def demarcate_words(bit_str, word_locs, word_len):
     return out
 
 
-def get_batch_of_seqs(key, word_len: int, seq_len: int, batch_size: int):
+def get_batch_of_seqs(
+    key, word_len: int, seq_len: int, batch_size: int, structure_coeff: float = 1.0
+):
     batch_word_locs = []
     batch_words = []
     batch_seqs = []
@@ -46,7 +48,9 @@ def get_batch_of_seqs(key, word_len: int, seq_len: int, batch_size: int):
         seq = ""
         while seq_len - len(seq) > 0:
             key, subkey = jax.random.split(key)
-            next_word_loc = jax.random.poisson(subkey, 2 * word_len).item()
+            next_word_loc = jax.random.poisson(
+                subkey, structure_coeff * word_len
+            ).item()
             key, subkey = jax.random.split(key)
             if not word_locs:
                 if next_word_loc < seq_len - word_len + 1:
@@ -91,8 +95,8 @@ class ModelConfig:
 @dataclasses.dataclass(frozen=True)
 class TrainConfig:
     batch_size: int = 32
-    seq_len: int = 32
-    word_len: int = 4
+    seq_len: int = 64
+    word_len: int = 8
     total_steps: int = 2500
     warmup_steps: int = 250
     learning_rate: float = 1e-3
@@ -100,6 +104,7 @@ class TrainConfig:
     grad_clip: float = 1.0
     seed: int = 42
     overfit_batch: bool = False
+    noise_coeff: float = 1.0  # A larger value means generated sequences are more like noise
 
 
 def init_params(config: ModelConfig, key: Array):
@@ -248,7 +253,11 @@ def train_model(model_config: ModelConfig, train_config: TrainConfig):
     if train_config.overfit_batch:
         key, subkey = jax.random.split(key)
         seqs, words, word_locs = get_batch_of_seqs(
-            subkey, train_config.word_len, train_config.seq_len, train_config.batch_size
+            subkey,
+            train_config.word_len,
+            train_config.seq_len,
+            train_config.batch_size,
+            train_config.noise_coeff,
         )
 
         # Prepare batches
@@ -264,6 +273,7 @@ def train_model(model_config: ModelConfig, train_config: TrainConfig):
                 train_config.word_len,
                 train_config.seq_len,
                 train_config.batch_size,
+                train_config.noise_coeff,
             )
             # Prepare batches
             inputs, targets = prepare_batch(seqs, word_locs, train_config.word_len)
@@ -370,13 +380,17 @@ def evaluate_model(
     model_config: ModelConfig,
     val_config: TrainConfig,
     n_sequences: int = 100,
-    override_batch = None,
+    override_batch=None,
 ) -> tuple[float, list[str]]:
     """Evaluate model on validation set and generate sample sequences."""
     # Generate validation set
     key = jax.random.key(val_config.seed + 1)  # Different seed from training
     seqs, words, word_locs = get_batch_of_seqs(
-        key, val_config.word_len, val_config.seq_len, n_sequences
+        key,
+        val_config.word_len,
+        val_config.seq_len,
+        n_sequences,
+        train_config.noise_coeff,
     )
 
     # Prepare validation data
@@ -417,14 +431,19 @@ if __name__ == "__main__":
     # Example usage
     model_config = ModelConfig()
     train_config = TrainConfig(
+        noise_coeff=0.0,
         # batch_size=1,
         # overfit_batch=True,
     )
-    val_config = TrainConfig(batch_size=32)  # Use same config structure for validation
+    val_config = TrainConfig(
+        batch_size=32, noise_coeff=train_config.noise_coeff
+    )  # Use same config structure for validation
 
     if train_config.overfit_batch:
         trained_params, memorized_stuff = train_model(model_config, train_config)
-        perplexity, samples = evaluate_model(trained_params, model_config, val_config, override_batch=memorized_stuff)
+        perplexity, samples = evaluate_model(
+            trained_params, model_config, val_config, override_batch=memorized_stuff
+        )
     else:
         trained_params = train_model(model_config, train_config)
         perplexity, samples = evaluate_model(trained_params, model_config, val_config)
