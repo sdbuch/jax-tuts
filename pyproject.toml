@@ -5,9 +5,12 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "einops>=0.8.1",
     "jax>=0.5.0",
+    "jaxtyping>=0.2.38",
     "jupyter>=1.1.1",
     "matplotlib>=3.10.0",
+    "optax>=0.2.4",
     "rich>=13.9.4",
     "treescope>=0.1.8",
 ]

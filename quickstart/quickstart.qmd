@@ -1,0 +1,49 @@
+---
+title: Jax quickstart tutorial playaround
+author: Sam Buchanan
+format:
+    html:
+        code-fold: show
+---
+
+# Info
+
+Running some examples from the Quickstart tutorial:
+[https://jax.readthedocs.io/en/latest/quickstart.html](https://jax.readthedocs.io/en/latest/quickstart.html)
+
+## Code imports
+
+```{python}
+import jax
+import jax.numpy as jnp
+```
+
+```{python}
+from jax import block_until_ready, jacfwd, jacrev, jit
+```
+
+## Hessian example with timing
+
+```{python}
+def sum_logistic(x):
+    return jnp.sum(1.0 / (1.0 + jnp.exp(-x)))
+
+
+def hessian(fun):
+    return jit(jacfwd(jacrev(fun)))
+
+
+def hessian_alt(fun):
+    return jit(jacrev(jacrev(fun)))
+
+
+x_small = jnp.arange(3.0)
+%timeit hessian_alt(sum_logistic)(x_small).block_until_ready()
+%timeit hessian(sum_logistic)(x_small).block_until_ready()
+```
+
+Do we see a difference with the gradient?
+```{python}
+%timeit jit(jacrev(sum_logistic)).block_until_ready()
+%timeit jit(jacfwd(sum_logistic)).block_until_ready()
+```

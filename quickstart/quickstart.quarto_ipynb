@@ -1,0 +1,108 @@
+{
+  "cells": [
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "---\n",
+        "title: Jax quickstart tutorial playaround\n",
+        "author: Sam Buchanan\n",
+        "format:\n",
+        "    html:\n",
+        "        code-fold: show\n",
+        "---\n",
+        "\n",
+        "\n",
+        "# Info\n",
+        "\n",
+        "Running some examples from the Quickstart tutorial:\n",
+        "[https://jax.readthedocs.io/en/latest/quickstart.html](https://jax.readthedocs.io/en/latest/quickstart.html)\n",
+        "\n",
+        "## Code imports\n"
+      ],
+      "id": "13e29c59"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "import jax\n",
+        "import jax.numpy as jnp"
+      ],
+      "id": "00d10fac",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "from jax import block_until_ready, jacfwd, jacrev, jit"
+      ],
+      "id": "4a17b687",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## Hessian example with timing\n"
+      ],
+      "id": "a8fef7ac"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "def sum_logistic(x):\n",
+        "    return jnp.sum(1.0 / (1.0 + jnp.exp(-x)))\n",
+        "\n",
+        "\n",
+        "def hessian(fun):\n",
+        "    return jit(jacfwd(jacrev(fun)))\n",
+        "\n",
+        "\n",
+        "def hessian_alt(fun):\n",
+        "    return jit(jacrev(jacrev(fun)))\n",
+        "\n",
+        "\n",
+        "x_small = jnp.arange(3.0)\n",
+        "%timeit hessian_alt(sum_logistic)(x_small).block_until_ready()\n",
+        "%timeit hessian(sum_logistic)(x_small).block_until_ready()"
+      ],
+      "id": "4518312e",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "Do we see a difference with the gradient?"
+      ],
+      "id": "b9e05d6d"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "%timeit jit(jacrev(sum_logistic)).block_until_ready()\n",
+        "%timeit jit(jacfwd(sum_logistic)).block_until_ready()"
+      ],
+      "id": "baf86ea9",
+      "execution_count": null,
+      "outputs": []
+    }
+  ],
+  "metadata": {
+    "kernelspec": {
+      "name": "python3",
+      "language": "python",
+      "display_name": "Python 3 (ipykernel)",
+      "path": "/Users/sdbuch/Library/Mobile Documents/com~apple~CloudDocs/Desktop/projects/github/jax-tuts/.venv/share/jupyter/kernels/python3"
+    }
+  },
+  "nbformat": 4,
+  "nbformat_minor": 5
+}
