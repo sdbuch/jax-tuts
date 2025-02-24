@@ -2,12 +2,22 @@
 # -*- coding: utf-8 -*-
 
 # imports
+import dataclasses
 from functools import partial
 
 import jax
 import jax.numpy as jnp
 from einops import rearrange
 from jaxtyping import Array, Float, Int
+
+
+@dataclasses.dataclass(frozen=True)
+class ModelConfig:
+    vocab_size: int = 2  # Binary sequences
+    d_model: int = 96
+    d_attn: int = 12
+    d_mlp: int = 256
+    n_layers: int = 4
 
 
 def gated_mlp(
@@ -42,7 +52,9 @@ def multi_head_attn(
     WO: Float[Array, "d d"],
 ) -> Float[Array, "T d"]:
     d = Q.shape[1]
-    assert d % d_attn == 0, f"Number of attention heads needs to divide model dimension ({d}, {d_attn})"
+    assert d % d_attn == 0, (
+        f"Number of attention heads needs to divide model dimension ({d}, {d_attn})"
+    )
     n_heads = d // d_attn
     Q, K, V = jax.tree.map(
         lambda x: rearrange(x, "T (h d_attn) -> h T d_attn", h=n_heads), (Q, K, V)

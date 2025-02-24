@@ -11,7 +11,26 @@ import jax
 import jax.numpy as jnp
 import optax
 from jaxtyping import Array, Float, Int
-from model import tf
+from meta_model import MetaModelConfig, cross_entropy_loss, meta_tf
+from model import ModelConfig, tf
+
+
+@dataclasses.dataclass(frozen=True)
+class TrainConfig:
+    batch_size: int = 32
+    seq_len: int = 48
+    word_len: int = 6
+    total_steps: int = 500
+    warmup_steps: int = 250
+    learning_rate: float = 1e-3
+    weight_decay: float = 0.1
+    grad_clip: float = 1.0
+    seed: int = 42
+    log_rate: int = 100
+    overfit_batch: bool = False
+    noise_coeff: float = (
+        1.0  # A larger value means generated sequences are more like noise
+    )
 
 
 def bit_array_to_bit_str(bit_arr):
@@ -83,30 +102,6 @@ def get_batch_of_seqs(
     return batch_seqs, batch_words, batch_word_locs
 
 
-@dataclasses.dataclass(frozen=True)
-class ModelConfig:
-    vocab_size: int = 2  # Binary sequences
-    d_model: int = 96
-    d_attn: int = 12
-    d_mlp: int = 256
-    n_layers: int = 4
-
-
-@dataclasses.dataclass(frozen=True)
-class TrainConfig:
-    batch_size: int = 32
-    seq_len: int = 64
-    word_len: int = 8
-    total_steps: int = 2500
-    warmup_steps: int = 250
-    learning_rate: float = 1e-3
-    weight_decay: float = 0.1
-    grad_clip: float = 1.0
-    seed: int = 42
-    overfit_batch: bool = False
-    noise_coeff: float = 1.0  # A larger value means generated sequences are more like noise
-
-
 def init_params(config: ModelConfig, key: Array):
     """Initialize transformer parameters with appropriate scaling."""
     keys = jax.random.split(key, 8)
@@ -117,10 +112,11 @@ def init_params(config: ModelConfig, key: Array):
     WE = jax.random.normal(keys[0], (config.vocab_size, d)) * scale_emb
 
     # Initialize attention matrices (scaled for QKV attention)
-    scale_attn = jnp.sqrt(2.0 / (2 * d))
+    scale_attn = 1.0  # We're using RMSnorm without Var, so we want to scale this up
     WQ = jax.random.normal(keys[1], (config.n_layers, d, d)) * scale_attn
     WK = jax.random.normal(keys[2], (config.n_layers, d, d)) * scale_attn
     WV = jax.random.normal(keys[3], (config.n_layers, d, d)) * scale_attn
+    scale_attn = jnp.sqrt(2.0 / (2 * d))
     WO = jax.random.normal(keys[4], (config.n_layers, d, d)) * scale_attn
 
     # Initialize MLP matrices
@@ -171,51 +167,48 @@ def create_train_state(model_config: ModelConfig, train_config: TrainConfig):
     return params, opt_state, optimizer
 
 
-def cross_entropy_loss(
-    logits: Float[Array, "T V"],
-    targets: Int[Array, "T"],
-) -> Float[Array, ""]:
-    """Compute cross entropy loss for next-token prediction."""
-    return optax.softmax_cross_entropy_with_integer_labels(logits, targets).mean()
-
-
-@partial(jax.jit, static_argnames=["optimizer", "model_config"])
+@partial(jax.jit, static_argnames=["optimizer", "model_config", "metamodel_config"])
 def train_step(
     params: dict,
     opt_state: optax.OptState,
     optimizer: optax.GradientTransformation,
     batch: Tuple[Array, Array],
     model_config: ModelConfig,
+    metamodel_config=None,
 ) -> Tuple[dict, optax.OptState, Float[Array, ""]]:
     """Single training step."""
     inputs, targets = batch
 
     def loss_fn(params):
-        model = partial(
-            tf,
-            model_config.d_attn,
-            params["WE"],
-            params["WQ"],
-            params["WK"],
-            params["WV"],
-            params["WO"],
-            params["W1"],
-            params["W2"],
-            params["W3"],
-        )
-        logits = jax.vmap(model)(inputs)
-        # logits = tf(
-        #     model_config.d_attn,
-        #     params["WE"],
-        #     params["WQ"],
-        #     params["WK"],
-        #     params["WV"],
-        #     params["WO"],
-        #     params["W1"],
-        #     params["W2"],
-        #     params["W3"],
-        #     inputs,
-        # )
+        if metamodel_config:
+            model = partial(
+                meta_tf,
+                model_config.d_attn,
+                params["WE"],
+                params["WQ"],
+                params["WK"],
+                params["WV"],
+                params["WO"],
+                params["W1"],
+                params["W2"],
+                params["W3"],
+                metamodel_config,
+            )
+            logits = jax.vmap(model)(inputs, targets)
+        else:
+            model = partial(
+                tf,
+                model_config.d_attn,
+                params["WE"],
+                params["WQ"],
+                params["WK"],
+                params["WV"],
+                params["WO"],
+                params["W1"],
+                params["W2"],
+                params["W3"],
+            )
+            logits = jax.vmap(model)(inputs)
         return jax.vmap(cross_entropy_loss)(logits, targets).mean()
 
     loss, grads = jax.value_and_grad(loss_fn)(params)
@@ -244,7 +237,11 @@ def prepare_batch(
     return inputs, targets
 
 
-def train_model(model_config: ModelConfig, train_config: TrainConfig):
+def train_model(
+    model_config: ModelConfig,
+    train_config: TrainConfig,
+    metamodel_config=None,
+):
     """Main training loop."""
     # Initialize training state
     params, opt_state, optimizer = create_train_state(model_config, train_config)
@@ -279,12 +276,22 @@ def train_model(model_config: ModelConfig, train_config: TrainConfig):
             inputs, targets = prepare_batch(seqs, word_locs, train_config.word_len)
 
         # Training step
-        params, opt_state, loss = train_step(
-            params, opt_state, optimizer, (inputs, targets), model_config
-        )
+        if metamodel_config:
+            params, opt_state, loss = train_step(
+                params,
+                opt_state,
+                optimizer,
+                (inputs, targets),
+                model_config,
+                metamodel_config,
+            )
+        else:
+            params, opt_state, loss = train_step(
+                params, opt_state, optimizer, (inputs, targets), model_config
+            )
 
         # Logging
-        if step % 100 == 0:
+        if step % train_config.log_rate == 0:
             print(f"Step {step}, Loss: {loss:.4f}")
 
     if train_config.overfit_batch:
@@ -293,16 +300,18 @@ def train_model(model_config: ModelConfig, train_config: TrainConfig):
         return params
 
 
-@partial(jax.jit, static_argnames=["model_config"])
+@partial(jax.jit, static_argnames=["model_config", "metamodel_config"])
 def compute_perplexity(
     params: dict,
     inputs: Int[Array, "B T"],
     targets: Int[Array, "B T"],
     model_config: ModelConfig,
+    metamodel_config=None,
 ) -> Float[Array, ""]:
     """Compute perplexity on a batch of sequences."""
-    logits = jax.vmap(
-        lambda x: tf(
+    if metamodel_config:
+        model = partial(
+            meta_tf,
             model_config.d_attn,
             params["WE"],
             params["WQ"],
@@ -312,9 +321,23 @@ def compute_perplexity(
             params["W1"],
             params["W2"],
             params["W3"],
-            x,
+            metamodel_config,
         )
-    )(inputs)
+        logits = jax.vmap(model)(inputs, targets)
+    else:
+        model = partial(
+            tf,
+            model_config.d_attn,
+            params["WE"],
+            params["WQ"],
+            params["WK"],
+            params["WV"],
+            params["WO"],
+            params["W1"],
+            params["W2"],
+            params["W3"],
+        )
+        logits = jax.vmap(model)(inputs)
 
     # Compute cross entropy loss
     loss = jax.vmap(lambda l, t: optax.softmax_cross_entropy_with_integer_labels(l, t))(
@@ -325,42 +348,64 @@ def compute_perplexity(
     return jnp.exp(loss)
 
 
-@partial(jax.jit, static_argnames=["model_config", "temperature"])
+@partial(jax.jit, static_argnames=["model_config", "temperature", "metamodel_config"])
 def sample_next_token(
+    key: jax.dtypes.prng_key,
     params: dict,
     sequence: Int[Array, "T"],
     model_config: ModelConfig,
     temperature: float = 1.0,
+    metamodel_config=None,
 ) -> int:
     """Sample the next token given a sequence."""
     # Get logits from model
-    logits = tf(
-        model_config.d_attn,
-        params["WE"],
-        params["WQ"],
-        params["WK"],
-        params["WV"],
-        params["WO"],
-        params["W1"],
-        params["W2"],
-        params["W3"],
-        sequence,
-    )
+    if metamodel_config:
+        model = partial(
+            meta_tf,
+            model_config.d_attn,
+            params["WE"],
+            params["WQ"],
+            params["WK"],
+            params["WV"],
+            params["WO"],
+            params["W1"],
+            params["W2"],
+            params["W3"],
+            metamodel_config,
+        )
+        inputs, targets = sequence[:-1], sequence[1:]
+        inference_token = sequence[-1][jnp.newaxis]
+        logits = model(inputs, targets, inference=True, inference_token=inference_token)
+    else:
+        model = partial(
+            tf,
+            model_config.d_attn,
+            params["WE"],
+            params["WQ"],
+            params["WK"],
+            params["WV"],
+            params["WO"],
+            params["W1"],
+            params["W2"],
+            params["W3"],
+        )
+        logits = model(sequence)
 
     # Get final token logits and apply temperature
     final_logits = logits[-1] / temperature
 
     # Sample from the distribution
-    key = jax.random.key(0)  # You might want to pass this as an argument
     return jax.random.categorical(key, final_logits)
 
 
 def generate_sequence(
+    key: jax.dtypes.prng_key,
     params: dict,
     model_config: ModelConfig,
     prompt: str,
     max_new_tokens: int,
     temperature: float = 1.0,
+    metamodel_config=None,
 ) -> str:
     """Generate a sequence given a prompt."""
     # Convert prompt to sequence of tokens
@@ -368,7 +413,14 @@ def generate_sequence(
 
     # Generate tokens one at a time
     for _ in range(max_new_tokens):
-        next_token = sample_next_token(params, sequence, model_config, temperature)
+        next_token = sample_next_token(
+            key,
+            params,
+            sequence,
+            model_config,
+            temperature,
+            metamodel_config=metamodel_config,
+        )
         sequence = jnp.append(sequence, next_token)
 
     # Convert back to string
@@ -381,6 +433,7 @@ def evaluate_model(
     val_config: TrainConfig,
     n_sequences: int = 100,
     override_batch=None,
+    metamodel_config=None,
 ) -> tuple[float, list[str]]:
     """Evaluate model on validation set and generate sample sequences."""
     # Generate validation set
@@ -400,19 +453,24 @@ def evaluate_model(
         inputs, targets = prepare_batch(seqs, word_locs, val_config.word_len)
 
     # Compute perplexity
-    perplexity = compute_perplexity(params, inputs, targets, model_config)
+    perplexity = compute_perplexity(
+        params, inputs, targets, model_config, metamodel_config=metamodel_config
+    )
 
     # Generate some sample sequences
     samples = []
     for i in range(min(5, n_sequences, len(seqs))):  # Generate 5 samples
         # Use first half of sequence as prompt
         prompt = seqs[i][: val_config.seq_len // 2]
+        key, subkey = jax.random.split(key)
         generated = generate_sequence(
+            subkey,
             params,
             model_config,
             prompt,
             val_config.seq_len // 2,  # Generate other half
             temperature=0.8,
+            metamodel_config=metamodel_config,
         )
         samples.append(
             {
@@ -432,21 +490,33 @@ if __name__ == "__main__":
     model_config = ModelConfig()
     train_config = TrainConfig(
         noise_coeff=0.0,
-        # batch_size=1,
-        # overfit_batch=True,
+        batch_size=1,
+        overfit_batch=True,
     )
     val_config = TrainConfig(
         batch_size=32, noise_coeff=train_config.noise_coeff
     )  # Use same config structure for validation
+    metamodel_config = MetaModelConfig()
+    # metamodel_config = None
 
     if train_config.overfit_batch:
-        trained_params, memorized_stuff = train_model(model_config, train_config)
+        trained_params, memorized_stuff = train_model(
+            model_config, train_config, metamodel_config=metamodel_config
+        )
         perplexity, samples = evaluate_model(
-            trained_params, model_config, val_config, override_batch=memorized_stuff
+            trained_params,
+            model_config,
+            val_config,
+            override_batch=memorized_stuff,
+            metamodel_config=metamodel_config,
         )
     else:
-        trained_params = train_model(model_config, train_config)
-        perplexity, samples = evaluate_model(trained_params, model_config, val_config)
+        trained_params = train_model(
+            model_config, train_config, metamodel_config=metamodel_config
+        )
+        perplexity, samples = evaluate_model(
+            trained_params, model_config, val_config, metamodel_config=metamodel_config
+        )
 
     print(f"\nValidation Perplexity: {perplexity:.4f}\n")
     print("Sample Generations:")
