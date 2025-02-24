@@ -16,7 +16,7 @@ from model import tf
 class MetaModelConfig:
     chunk_len: int = 12
     stride_len: int = 12
-    ilr: float = 1e-1
+    ilr: float = 1e-3
     grad_clip: float = 1.0
 
 

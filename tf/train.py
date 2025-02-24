@@ -20,7 +20,7 @@ class TrainConfig:
     batch_size: int = 32
     seq_len: int = 48
     word_len: int = 6
-    total_steps: int = 500
+    total_steps: int = 2500
     warmup_steps: int = 250
     learning_rate: float = 1e-3
     weight_decay: float = 0.1
@@ -490,14 +490,14 @@ if __name__ == "__main__":
     model_config = ModelConfig()
     train_config = TrainConfig(
         noise_coeff=0.0,
-        batch_size=1,
-        overfit_batch=True,
+        # batch_size=1,
+        # overfit_batch=True,
     )
     val_config = TrainConfig(
         batch_size=32, noise_coeff=train_config.noise_coeff
     )  # Use same config structure for validation
-    metamodel_config = MetaModelConfig()
-    # metamodel_config = None
+    # metamodel_config = MetaModelConfig()
+    metamodel_config = None
 
     if train_config.overfit_batch:
         trained_params, memorized_stuff = train_model(
