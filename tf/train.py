@@ -12,14 +12,14 @@ import jax.numpy as jnp
 import optax
 from jaxtyping import Array, Float, Int
 from meta_model import MetaModelConfig, cross_entropy_loss, meta_tf
-from model import ModelConfig, tf
+from model import ModelConfig, pack_params, tf, unpack_params
 
 
 @dataclasses.dataclass(frozen=True)
 class TrainConfig:
     batch_size: int = 32
-    seq_len: int = 48
-    word_len: int = 6
+    seq_len: int = 24
+    word_len: int = 4
     total_steps: int = 2500
     warmup_steps: int = 250
     learning_rate: float = 1e-3
@@ -125,16 +125,7 @@ def init_params(config: ModelConfig, key: Array):
     W2 = jax.random.normal(keys[6], (config.n_layers, config.d_mlp, d)) * scale_mlp
     W3 = jax.random.normal(keys[7], (config.n_layers, d, config.d_mlp)) * scale_mlp
 
-    return {
-        "WE": WE,
-        "WQ": WQ,
-        "WK": WK,
-        "WV": WV,
-        "WO": WO,
-        "W1": W1,
-        "W2": W2,
-        "W3": W3,
-    }
+    return pack_params(WE, WQ, WK, WV, WO, W1, W2, W3)
 
 
 def create_train_state(model_config: ModelConfig, train_config: TrainConfig):
@@ -184,14 +175,7 @@ def train_step(
             model = partial(
                 meta_tf,
                 model_config.d_attn,
-                params["WE"],
-                params["WQ"],
-                params["WK"],
-                params["WV"],
-                params["WO"],
-                params["W1"],
-                params["W2"],
-                params["W3"],
+                *unpack_params(params),
                 metamodel_config,
             )
             logits = jax.vmap(model)(inputs, targets)
@@ -199,14 +183,7 @@ def train_step(
             model = partial(
                 tf,
                 model_config.d_attn,
-                params["WE"],
-                params["WQ"],
-                params["WK"],
-                params["WV"],
-                params["WO"],
-                params["W1"],
-                params["W2"],
-                params["W3"],
+                *unpack_params(params),
             )
             logits = jax.vmap(model)(inputs)
         return jax.vmap(cross_entropy_loss)(logits, targets).mean()
@@ -261,6 +238,7 @@ def train_model(
         inputs, targets = prepare_batch(seqs, word_locs, train_config.word_len)
 
     # Training loop
+    losses = []
     for step in range(train_config.total_steps):
         if not train_config.overfit_batch:
             # Generate batch
@@ -289,15 +267,75 @@ def train_model(
             params, opt_state, loss = train_step(
                 params, opt_state, optimizer, (inputs, targets), model_config
             )
+        losses.append(loss)
 
         # Logging
         if step % train_config.log_rate == 0:
             print(f"Step {step}, Loss: {loss:.4f}")
 
+    # Write results
+    fn = generate_filename(train_config, model_config, metamodel_config) + ".npy"
+    jnp.save(fn, losses)
+
     if train_config.overfit_batch:
         return params, (inputs, targets, seqs, words, word_locs)
     else:
         return params
+
+
+def generate_filename(train_config, model_config, metamodel_config=None):
+    """
+    Generate a detailed filename based on configuration parameters.
+
+    Args:
+        train_config: TrainConfig object
+        model_config: ModelConfig object
+        metamodel_config: MetaModelConfig object (optional)
+
+    Returns:
+        str: Formatted filename with parameter abbreviations
+    """
+    # Abbreviations for TrainConfig parameters
+    tc_parts = [
+        f"bs{train_config.batch_size}",
+        f"sl{train_config.seq_len}",
+        f"wl{train_config.word_len}",
+        f"ts{train_config.total_steps}",
+        f"ws{train_config.warmup_steps}",
+        f"lr{train_config.learning_rate:.1e}",
+        f"wd{train_config.weight_decay:.2f}",
+        f"gc{train_config.grad_clip:.1f}",
+        f"sd{train_config.seed}",
+    ]
+
+    # Add overfit_batch flag if True
+    if train_config.overfit_batch:
+        tc_parts.append("of")
+
+    tc_parts.append(f"nc{train_config.noise_coeff:.1f}")
+
+    # Abbreviations for ModelConfig parameters
+    mc_parts = [
+        f"dm{model_config.d_model}",
+        f"da{model_config.d_attn}",
+        f"dmlp{model_config.d_mlp}",
+        f"nl{model_config.n_layers}",
+    ]
+
+    # Join all parts with underscores
+    filename = f"TRAIN_{'_'.join(tc_parts)}_MODEL_{'_'.join(mc_parts)}"
+
+    # Add MetaModelConfig parameters if provided
+    if metamodel_config is not None:
+        mmc_parts = [
+            f"cl{metamodel_config.chunk_len}",
+            f"stl{metamodel_config.stride_len}",
+            f"ilr{metamodel_config.ilr:.1e}",
+            f"gc{metamodel_config.grad_clip:.1f}",
+        ]
+        filename += f"_META_{'_'.join(mmc_parts)}"
+
+    return filename
 
 
 @partial(jax.jit, static_argnames=["model_config", "metamodel_config"])
@@ -313,14 +351,7 @@ def compute_perplexity(
         model = partial(
             meta_tf,
             model_config.d_attn,
-            params["WE"],
-            params["WQ"],
-            params["WK"],
-            params["WV"],
-            params["WO"],
-            params["W1"],
-            params["W2"],
-            params["W3"],
+            *unpack_params(params),
             metamodel_config,
         )
         logits = jax.vmap(model)(inputs, targets)
@@ -328,14 +359,7 @@ def compute_perplexity(
         model = partial(
             tf,
             model_config.d_attn,
-            params["WE"],
-            params["WQ"],
-            params["WK"],
-            params["WV"],
-            params["WO"],
-            params["W1"],
-            params["W2"],
-            params["W3"],
+            *unpack_params(params),
         )
         logits = jax.vmap(model)(inputs)
 
@@ -363,14 +387,7 @@ def sample_next_token(
         model = partial(
             meta_tf,
             model_config.d_attn,
-            params["WE"],
-            params["WQ"],
-            params["WK"],
-            params["WV"],
-            params["WO"],
-            params["W1"],
-            params["W2"],
-            params["W3"],
+            *unpack_params(params),
             metamodel_config,
         )
         inputs, targets = sequence[:-1], sequence[1:]
@@ -380,14 +397,7 @@ def sample_next_token(
         model = partial(
             tf,
             model_config.d_attn,
-            params["WE"],
-            params["WQ"],
-            params["WK"],
-            params["WV"],
-            params["WO"],
-            params["W1"],
-            params["W2"],
-            params["W3"],
+            *unpack_params(params),
         )
         logits = model(sequence)
 
@@ -487,17 +497,22 @@ def evaluate_model(
 
 if __name__ == "__main__":
     # Example usage
-    model_config = ModelConfig()
+    model_config = ModelConfig(
+        n_layers=1,
+    )
     train_config = TrainConfig(
-        noise_coeff=0.0,
+        noise_coeff=1.0,
         # batch_size=1,
         # overfit_batch=True,
+        # total_steps=500,
     )
     val_config = TrainConfig(
         batch_size=32, noise_coeff=train_config.noise_coeff
     )  # Use same config structure for validation
-    # metamodel_config = MetaModelConfig()
-    metamodel_config = None
+    metamodel_config = MetaModelConfig(
+        ilr=1e-2,
+    )
+    # metamodel_config = None
 
     if train_config.overfit_batch:
         trained_params, memorized_stuff = train_model(

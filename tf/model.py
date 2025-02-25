@@ -8,7 +8,7 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 from einops import rearrange
-from jaxtyping import Array, Float, Int
+from jaxtyping import Array, Float, Int, PyTree
 
 
 @dataclasses.dataclass(frozen=True)
@@ -18,6 +18,42 @@ class ModelConfig:
     d_attn: int = 12
     d_mlp: int = 256
     n_layers: int = 4
+
+
+def pack_params(
+    WE: Float[Array, "k d"],
+    WQ: Float[Array, "L d d"],
+    WK: Float[Array, "L d d"],
+    WV: Float[Array, "L d d"],
+    WO: Float[Array, "L d d"],
+    W1: Float[Array, "L d_mlp d"],
+    W2: Float[Array, "L d_mlp d"],
+    W3: Float[Array, "L d d_mlp"],
+):
+    params = {
+        "WE": WE,
+        "WQ": WQ,
+        "WK": WK,
+        "WV": WV,
+        "WO": WO,
+        "W1": W1,
+        "W2": W2,
+        "W3": W3,
+    }
+    return params
+
+
+def unpack_params(params):
+    return (
+        params["WE"],
+        params["WQ"],
+        params["WK"],
+        params["WV"],
+        params["WO"],
+        params["W1"],
+        params["W2"],
+        params["W3"],
+    )
 
 
 def gated_mlp(
@@ -31,12 +67,60 @@ def gated_mlp(
     return W3 @ (f * g)
 
 
+def precompute_freqs_cis(
+    dim: int, end: int, theta: float = 1000.0, dtype: jnp.dtype = jnp.float32
+) -> jnp.ndarray:
+    freqs = 1.0 / (theta ** (jnp.arange(0, dim, 2)[: (dim // 2)].astype(dtype) / dim))
+    t = jnp.arange(end)
+    freqs = jnp.outer(t, freqs).astype(dtype)
+    sin, cos = jnp.sin(freqs), jnp.cos(freqs)
+    freqs_cis = jnp.complex64(cos + 1j * sin)
+    return jnp.asarray(freqs_cis)
+
+
+def apply_rotary_emb(
+    x,
+    freqs_cis: jnp.ndarray,
+):
+    x = x[:, None, :]
+    d_emb = x.shape[-1]
+    input_dtype = x.dtype
+    freqs_cis = jnp.reshape(
+        freqs_cis, (*freqs_cis.shape[:-1], 1, *freqs_cis.shape[-1:])
+    )
+    reshape_x = x.astype(jnp.float32).reshape(*x.shape[:-1], d_emb // 2, 2)
+    x_ = jax.lax.complex(reshape_x[..., 0], reshape_x[..., 1])
+    x_out = x_ * freqs_cis
+    x_out = jnp.stack((jnp.real(x_out), jnp.imag(x_out)), axis=-1).reshape(
+        *x_out.shape[:-1], d_emb
+    )
+    return x_out.squeeze(1).astype(input_dtype)
+
+
+def apply_rope(
+    xis: PyTree[jnp.ndarray],
+    rope_theta: float = 500.0,
+) -> PyTree[jnp.ndarray]:
+    chunk_size, d_attn = xis[0].shape
+    position_ids = jnp.arange(chunk_size)
+    freqs_cis = precompute_freqs_cis(
+        d_attn,  # self.head_dim,
+        chunk_size,  # self.config.chunk_size,
+        theta=rope_theta,
+        dtype=jnp.float32,
+    )
+    freqs_cis = jnp.take(freqs_cis, position_ids, axis=0)
+    out_xis = jax.tree.map(lambda x: apply_rotary_emb(x, freqs_cis=freqs_cis), xis)
+    return out_xis
+
+
 def attn(
     Q: Float[Array, "T d_attn"],
     K: Float[Array, "T d_attn"],
     V: Float[Array, "T d_attn"],
 ) -> Float[Array, "T d_attn"]:
     d_attn = Q.shape[1]
+    Q, K = apply_rope((Q, K))
     A = Q @ K.T / jnp.sqrt(d_attn)
     causal_mask = jnp.tril(jnp.ones_like(A))
     A += jnp.where(causal_mask, 0, -jnp.inf)

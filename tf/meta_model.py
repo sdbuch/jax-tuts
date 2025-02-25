@@ -9,14 +9,14 @@ import jax.numpy as jnp
 import optax
 from einops import rearrange
 from jaxtyping import Array, Float, Int
-from model import tf
+from model import pack_params, tf, unpack_params
 
 
 @dataclasses.dataclass(frozen=True)
 class MetaModelConfig:
-    chunk_len: int = 12
-    stride_len: int = 12
-    ilr: float = 1e-3
+    chunk_len: int = 8
+    stride_len: int = 1
+    ilr: float = 1e-1
     grad_clip: float = 1.0
 
 
@@ -49,41 +49,41 @@ def meta_tf(
     W1: Float[Array, "L d_mlp d"],
     W2: Float[Array, "L d_mlp d"],
     W3: Float[Array, "L d d_mlp"],
-    metamodel_config: MetaModelConfig,
+    mc: MetaModelConfig,
     X: Int[Array, "T"],
     Y: Int[Array, "T"],
     inference: bool = False,
     inference_token: Int[Array, "1"] | None = None,
 ) -> Float[Array, "T k"]:
-    params = {
-        "WE": WE,
-        "WQ": WQ,
-        "WK": WK,
-        "WV": WV,
-        "WO": WO,
-        "W1": W1,
-        "W2": W2,
-        "W3": W3,
-    }
-    opt_state, optimizer = create_opt_state(metamodel_config, params)
+    params = pack_params(WE, WQ, WK, WV, WO, W1, W2, W3)
+    opt_state, optimizer = create_opt_state(mc, params)
 
-    assert metamodel_config.stride_len == metamodel_config.chunk_len, (
-        "Non-chunk operation not implemented"
+    assert mc.stride_len == mc.chunk_len or mc.stride_len == 1, (
+        "Non-chunk/non-sliding operation not permitted"
     )
     inputs, targets = (
         [
-            X[i : i + metamodel_config.chunk_len]
-            for i in range(0, len(X), metamodel_config.stride_len)
+            X[i : i + mc.chunk_len]
+            for i in range(0, len(X) - mc.chunk_len + 1, mc.stride_len)
         ],
         [
-            Y[i : i + metamodel_config.chunk_len]
-            for i in range(0, len(X), metamodel_config.stride_len)
+            Y[i : i + mc.chunk_len]
+            for i in range(0, len(X) - mc.chunk_len + 1, mc.stride_len)
         ],
     )
-    if len(inputs[-1]) < metamodel_config.chunk_len:
+    if len(X) < mc.chunk_len:
+        # Sliding window operation, and the input is smaller than the chunk length
+        inputs, targets = (
+            jnp.array((inputs,), dtype=jnp.int32),
+            jnp.array((targets,), dtype=jnp.int32),
+        )
+        inputs_left = X
+    elif len(inputs[-1]) < mc.chunk_len:
+        # Chunk operation, and we have some leftover
         inputs, inputs_left = jnp.array(inputs[:-1]), inputs[-1]
         targets, _ = jnp.array(targets[:-1]), targets[-1]
     else:
+        # Either operation, no leftover
         inputs, inputs_left = jnp.array(inputs), jnp.array((), dtype=jnp.int32)
         targets, _ = jnp.array(targets), jnp.array((), dtype=jnp.int32)
 
@@ -94,14 +94,7 @@ def meta_tf(
         parameterization = lambda p: partial(
             tf,
             d_attn,
-            p["WE"],
-            p["WQ"],
-            p["WK"],
-            p["WV"],
-            p["WO"],
-            p["W1"],
-            p["W2"],
-            p["W3"],
+            *unpack_params(p),
         )
         loss_fn = lambda p: cross_entropy_loss(
             parameterization(p)(inputs), targets
@@ -117,21 +110,31 @@ def meta_tf(
         chunk_fn, (params, opt_state), (inputs, targets)
     )
 
-    logits = rearrange(logits, "c s k -> (c s) k")
+    if mc.stride_len == 1:
+        # Sliding mode: keep first, the rest predict 1 token
+        if logits.shape[0] > 1:
+            first, rest = logits[0], logits[1:]
+            logits = jnp.concatenate((first, rest[:, -1, :]))
+        else:
+            logits = logits[0]
+    else:
+        # Chunk mode: un-chunk
+        logits = rearrange(logits, "c s k -> (c s) k")
     final_model = partial(
         tf,
         d_attn,
-        new_params["WE"],
-        new_params["WQ"],
-        new_params["WK"],
-        new_params["WV"],
-        new_params["WO"],
-        new_params["W1"],
-        new_params["W2"],
-        new_params["W3"],
+        *unpack_params(new_params),
     )
     if inference:
-        leftover = jnp.concatenate((inputs_left, inference_token))
+        if mc.stride_len == 1:
+            # SW mode: Put the inference tok on its SW
+            if len(inputs_left) > 0:
+                leftover = jnp.concatenate((inputs_left, inference_token))
+            else:
+                leftover = jnp.concatenate((inputs[-1, 1:], inference_token))
+        else:
+            # Chunk mode: make a new chunk out of what's left + the inference tok
+            leftover = jnp.concatenate((inputs_left, inference_token))
     else:
         leftover = inputs_left
     last = final_model(leftover)
