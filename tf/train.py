@@ -498,10 +498,10 @@ def evaluate_model(
 if __name__ == "__main__":
     # Example usage
     model_config = ModelConfig(
-        n_layers=1,
+        n_layers=3,
     )
     train_config = TrainConfig(
-        noise_coeff=1.0,
+        noise_coeff=0.1,
         # batch_size=1,
         # overfit_batch=True,
         # total_steps=500,
@@ -509,10 +509,10 @@ if __name__ == "__main__":
     val_config = TrainConfig(
         batch_size=32, noise_coeff=train_config.noise_coeff
     )  # Use same config structure for validation
-    metamodel_config = MetaModelConfig(
-        ilr=1e-2,
-    )
-    # metamodel_config = None
+    # metamodel_config = MetaModelConfig(
+    #     ilr=1e-3,
+    # )
+    metamodel_config = None
 
     if train_config.overfit_batch:
         trained_params, memorized_stuff = train_model(

@@ -16,7 +16,7 @@ from model import pack_params, tf, unpack_params
 class MetaModelConfig:
     chunk_len: int = 8
     stride_len: int = 1
-    ilr: float = 1e-1
+    ilr: float = 1e-1  # TODO: Maybe want to scale the base LR by 1/chunk_size (because 1 token is seen many times)
     grad_clip: float = 1.0
 
 
