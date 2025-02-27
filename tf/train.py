@@ -11,7 +11,7 @@ import jax
 import jax.numpy as jnp
 import optax
 from jaxtyping import Array, Float, Int
-from meta_model import MetaModelConfig, cross_entropy_loss, meta_tf
+from meta_model import cross_entropy_loss, meta_tf, MetaModelConfig
 from model import ModelConfig, pack_params, tf, unpack_params
 
 
@@ -63,6 +63,9 @@ def get_batch_of_seqs(
         key, subkey = jax.random.split(key)
         word = bit_array_to_bit_str(jax.random.randint(subkey, (word_len,), 0, 2))
         # Poisson process to generate the sequence
+        # TODO: This has a simpler interpretation if geometric
+        # TODO: Do this with pmap for explicit parallelism
+        # TODO: Should be able to simplify implementation with fewer conditionals (sample a rv; put this many noise; put the word; repeat until exhausted...)
         word_locs = []
         seq = ""
         while seq_len - len(seq) > 0:
@@ -498,17 +501,26 @@ def evaluate_model(
 if __name__ == "__main__":
     # Example usage
     model_config = ModelConfig(
-        n_layers=3,
+        n_layers=12,
+        d_model=768,
+        d_attn=48,
+        d_mlp=2048,
     )
+
     train_config = TrainConfig(
-        noise_coeff=0.1,
+        noise_coeff=0.5,
+        seq_len=512,
+        word_len=16,
+        batch_size=32,
+        learning_rate=1e-4,
+        weight_decay=1e-2,
+        total_steps=5000,
+        warmup_steps=500,
         # batch_size=1,
         # overfit_batch=True,
         # total_steps=500,
     )
-    val_config = TrainConfig(
-        batch_size=32, noise_coeff=train_config.noise_coeff
-    )  # Use same config structure for validation
+    val_config = train_config
     # metamodel_config = MetaModelConfig(
     #     ilr=1e-3,
     # )
