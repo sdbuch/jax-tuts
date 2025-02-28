@@ -10,8 +10,9 @@ from typing import Tuple
 import jax
 import jax.numpy as jnp
 import optax
+from data import demarcate_words, get_batch_of_seqs
 from jaxtyping import Array, Float, Int
-from meta_model import cross_entropy_loss, meta_tf, MetaModelConfig
+from meta_model import cross_entropy_loss, meta_tf
 from model import ModelConfig, pack_params, tf, unpack_params
 
 
@@ -31,78 +32,6 @@ class TrainConfig:
     noise_coeff: float = (
         1.0  # A larger value means generated sequences are more like noise
     )
-
-
-def bit_array_to_bit_str(bit_arr):
-    return "".join(str(w.item()) for w in bit_arr)
-
-
-def bit_str_to_bit_arr(bit_str):
-    return jnp.array(list(map(int, list(bit_str))))
-
-
-def demarcate_words(bit_str, word_locs, word_len):
-    out = ""
-    for i, char in enumerate(bit_str):
-        if i in word_locs:
-            out += f"|{char}"
-        elif i in jax.tree.map(lambda x: x + word_len - 1, word_locs):
-            out += f"{char}|"
-        else:
-            out += char
-    return out
-
-
-def get_batch_of_seqs(
-    key, word_len: int, seq_len: int, batch_size: int, structure_coeff: float = 1.0
-):
-    batch_word_locs = []
-    batch_words = []
-    batch_seqs = []
-    for i in range(batch_size):
-        key, subkey = jax.random.split(key)
-        word = bit_array_to_bit_str(jax.random.randint(subkey, (word_len,), 0, 2))
-        # Poisson process to generate the sequence
-        # TODO: This has a simpler interpretation if geometric
-        # TODO: Do this with pmap for explicit parallelism
-        # TODO: Should be able to simplify implementation with fewer conditionals (sample a rv; put this many noise; put the word; repeat until exhausted...)
-        word_locs = []
-        seq = ""
-        while seq_len - len(seq) > 0:
-            key, subkey = jax.random.split(key)
-            next_word_loc = jax.random.poisson(
-                subkey, structure_coeff * word_len
-            ).item()
-            key, subkey = jax.random.split(key)
-            if not word_locs:
-                if next_word_loc < seq_len - word_len + 1:
-                    word_locs.append(next_word_loc)
-                    noise = bit_array_to_bit_str(
-                        jax.random.randint(subkey, (next_word_loc,), 0, 2)
-                    )
-                    seq += noise + word
-                else:
-                    noise = bit_array_to_bit_str(
-                        jax.random.randint(subkey, (seq_len,), 0, 2)
-                    )
-                    seq += noise
-            elif next_word_loc + word_locs[-1] + word_len < seq_len - word_len + 1:
-                word_locs.append(word_locs[-1] + word_len + next_word_loc)
-                noise = bit_array_to_bit_str(
-                    jax.random.randint(subkey, (next_word_loc,), 0, 2)
-                )
-                seq += noise + word
-            else:
-                noise = bit_array_to_bit_str(
-                    jax.random.randint(
-                        subkey, (seq_len - word_locs[-1] - word_len,), 0, 2
-                    )
-                )
-                seq += noise
-        batch_seqs.append(seq)
-        batch_words.append(word)
-        batch_word_locs.append(word_locs)
-    return batch_seqs, batch_words, batch_word_locs
 
 
 def init_params(config: ModelConfig, key: Array):
@@ -131,7 +60,7 @@ def init_params(config: ModelConfig, key: Array):
     return pack_params(WE, WQ, WK, WV, WO, W1, W2, W3)
 
 
-def create_train_state(model_config: ModelConfig, train_config: TrainConfig):
+def create_train_state(key, model_config: ModelConfig, train_config: TrainConfig):
     """Initialize training state with optimizer and parameters."""
     # Create learning rate schedule
     warmup_fn = optax.linear_schedule(
@@ -154,7 +83,6 @@ def create_train_state(model_config: ModelConfig, train_config: TrainConfig):
     )
 
     # Initialize parameters
-    key = jax.random.key(train_config.seed)
     params = init_params(model_config, key)
     opt_state = optimizer.init(params)
 
@@ -224,8 +152,9 @@ def train_model(
 ):
     """Main training loop."""
     # Initialize training state
-    params, opt_state, optimizer = create_train_state(model_config, train_config)
     key = jax.random.key(train_config.seed)
+    key, subkey = jax.random.split(key)
+    params, opt_state, optimizer = create_train_state(subkey, model_config, train_config)
 
     if train_config.overfit_batch:
         key, subkey = jax.random.split(key)
@@ -451,8 +380,9 @@ def evaluate_model(
     """Evaluate model on validation set and generate sample sequences."""
     # Generate validation set
     key = jax.random.key(val_config.seed + 1)  # Different seed from training
+    key, subkey = jax.random.split(key)
     seqs, words, word_locs = get_batch_of_seqs(
-        key,
+        subkey,
         val_config.word_len,
         val_config.seq_len,
         n_sequences,

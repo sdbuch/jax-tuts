@@ -9,6 +9,7 @@ dependencies = [
     "jaxtyping>=0.2.38",
     "jupyter>=1.1.1",
     "matplotlib>=3.10.0",
+    "matplotlib-backend-sixel>=0.1.0",
     "optax>=0.2.4",
     "rich>=13.9.4",
     "seaborn>=0.13.2",
