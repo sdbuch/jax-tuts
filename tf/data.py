@@ -16,10 +16,11 @@ def bit_str_to_bit_arr(bit_str):
 
 def demarcate_words(bit_str, word_locs, word_len):
     out = ""
+    end_locs = jax.tree.map(lambda x: x + word_len - 1, word_locs)
     for i, char in enumerate(bit_str):
         if i in word_locs:
             out += f"|{char}"
-        elif i in jax.tree.map(lambda x: x + word_len - 1, word_locs):
+        elif i in end_locs:
             out += f"{char}|"
         else:
             out += char
@@ -59,9 +60,11 @@ def generate_one_seq(word_len: int, seq_len: int, structure_coeff: float, key):
     accumulated_locs = [locs[0]]
     for loc in locs[1:]:
         accumulated_locs += [accumulated_locs[-1] + word_len + loc]
-    accumulated_locs = [loc for loc in accumulated_locs if loc < len(seq) - 1]
+    accumulated_locs = [
+        loc for loc in accumulated_locs if loc < len(seq) - len(word) - 1
+    ]
 
-    return seq, word, accumulated_locs
+    return seq, word, jnp.array(accumulated_locs, dtype=jnp.int32)
 
 
 def get_batch_of_seqs(

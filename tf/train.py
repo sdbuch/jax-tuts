@@ -10,7 +10,8 @@ from typing import Tuple
 import jax
 import jax.numpy as jnp
 import optax
-from data import demarcate_words, get_batch_of_seqs
+from baselines import oracle, reflector
+from data import bit_str_to_bit_arr, demarcate_words, get_batch_of_seqs
 from jaxtyping import Array, Float, Int
 from meta_model import cross_entropy_loss, meta_tf
 from model import ModelConfig, pack_params, tf, unpack_params
@@ -154,7 +155,9 @@ def train_model(
     # Initialize training state
     key = jax.random.key(train_config.seed)
     key, subkey = jax.random.split(key)
-    params, opt_state, optimizer = create_train_state(subkey, model_config, train_config)
+    params, opt_state, optimizer = create_train_state(
+        subkey, model_config, train_config
+    )
 
     if train_config.overfit_batch:
         key, subkey = jax.random.split(key)
@@ -277,7 +280,7 @@ def compute_perplexity(
     targets: Int[Array, "B T"],
     model_config: ModelConfig,
     metamodel_config=None,
-) -> Float[Array, ""]:
+) -> tuple[Float[Array, ""], Float[Array, ""]]:
     """Compute perplexity on a batch of sequences."""
     if metamodel_config:
         model = partial(
@@ -299,9 +302,11 @@ def compute_perplexity(
     loss = jax.vmap(lambda l, t: optax.softmax_cross_entropy_with_integer_labels(l, t))(
         logits, targets
     ).mean()
+    preds = jnp.argmax(logits, axis=-1)
+    acc = (preds == targets).mean()
 
     # Convert to perplexity
-    return jnp.exp(loss)
+    return jnp.exp(loss), acc
 
 
 @partial(jax.jit, static_argnames=["model_config", "temperature", "metamodel_config"])
@@ -376,7 +381,7 @@ def evaluate_model(
     n_sequences: int = 100,
     override_batch=None,
     metamodel_config=None,
-) -> tuple[float, list[str]]:
+) -> tuple[float, list[str], dict]:
     """Evaluate model on validation set and generate sample sequences."""
     # Generate validation set
     key = jax.random.key(val_config.seed + 1)  # Different seed from training
@@ -396,9 +401,30 @@ def evaluate_model(
         inputs, targets = prepare_batch(seqs, word_locs, val_config.word_len)
 
     # Compute perplexity
-    perplexity = compute_perplexity(
+    perplexity, model_acc = compute_perplexity(
         params, inputs, targets, model_config, metamodel_config=metamodel_config
     )
+
+    # Evaluate baselines
+    oracle_fn = partial(oracle, val_config.seq_len)
+    reflector_fn = partial(reflector, val_config.word_len)
+    pad_max = max(map(len, word_locs))
+    oracle_preds = jax.vmap(oracle_fn)(
+        jnp.array(jax.tree.map(bit_str_to_bit_arr, words)),
+        jnp.array(
+            jax.tree.map(
+                lambda x, pad_size=pad_max: jnp.pad(
+                    x, pad_width=(0, pad_size - len(x)), mode="edge"
+                ),
+                word_locs,
+            )
+        ),
+    )
+    # This is very hard to make compatible with jax transforms
+    reflector_preds = jnp.array([reflector_fn(input) for input in inputs])
+    oracle_acc = (oracle_preds == targets).mean()
+    reflector_acc = (reflector_preds == targets).mean()
+    accs = {"model": model_acc, "oracle": oracle_acc, "algo baseline": reflector_acc}
 
     # Generate some sample sequences
     samples = []
@@ -425,7 +451,7 @@ def evaluate_model(
             }
         )
 
-    return perplexity, samples
+    return perplexity, samples, accs
 
 
 if __name__ == "__main__":
@@ -460,7 +486,7 @@ if __name__ == "__main__":
         trained_params, memorized_stuff = train_model(
             model_config, train_config, metamodel_config=metamodel_config
         )
-        perplexity, samples = evaluate_model(
+        perplexity, samples, accs = evaluate_model(
             trained_params,
             model_config,
             val_config,
@@ -471,11 +497,14 @@ if __name__ == "__main__":
         trained_params = train_model(
             model_config, train_config, metamodel_config=metamodel_config
         )
-        perplexity, samples = evaluate_model(
+        perplexity, samples, accs = evaluate_model(
             trained_params, model_config, val_config, metamodel_config=metamodel_config
         )
 
     print(f"\nValidation Perplexity: {perplexity:.4f}\n")
+    print("\nValidation Accuracies")
+    for k, v in accs.items():
+        print(f"{k}: {v}")
     print("Sample Generations:")
     for i, sample in enumerate(samples, 1):
         print(f"\nSample {i}:")
