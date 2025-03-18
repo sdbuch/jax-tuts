@@ -1,0 +1,64 @@
+---
+title:
+author: Sam Buchanan
+format:
+    html:
+        code-fold: show
+---
+
+## Code imports
+
+```{python}
+import treescope
+import jax
+import jax.numpy as jnp
+import matplotlib.pyplot as plt
+
+treescope.basic_interactive_setup(autovisualize_arrays=True)
+```
+
+## Look at RoPE decay!
+
+```{python}
+d = 200
+delta_max = 1000
+deltas = jnp.arange(-delta_max, delta_max)
+theta = 1e4
+
+i = jnp.arange(d//2)
+thetas = theta ** (-2/d * i)
+# thetas = jnp.linspace(1/theta, 1, d//2)
+grid = jnp.outer(deltas, thetas)
+cis = jnp.complex64(jnp.cos(grid) + 1j * jnp.sin(grid))
+partials = jnp.abs(jnp.cumsum(cis, axis=-1))
+```
+
+```{python}
+plt.plot(partials.sum(axis=-1))
+plt.show()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

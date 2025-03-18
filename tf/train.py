@@ -457,21 +457,21 @@ def evaluate_model(
 if __name__ == "__main__":
     # Example usage
     model_config = ModelConfig(
-        n_layers=12,
-        d_model=768,
-        d_attn=48,
-        d_mlp=2048,
+        # n_layers=12,
+        # d_model=768,
+        # d_attn=48,
+        # d_mlp=2048,
     )
 
     train_config = TrainConfig(
-        noise_coeff=0.5,
+        noise_coeff=0.25,
         seq_len=512,
         word_len=16,
         batch_size=32,
         learning_rate=1e-4,
         weight_decay=1e-2,
-        total_steps=5000,
-        warmup_steps=500,
+        total_steps=2,
+        warmup_steps=1,
         # batch_size=1,
         # overfit_batch=True,
         # total_steps=500,
